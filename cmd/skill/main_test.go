@@ -17,36 +17,70 @@ func TestWebhook(t *testing.T) {
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
-	successBody := `{
-        "response": {
-            "text": "Извините, я пока ничего не умею"
-        },
-        "version": "1.0"
-    }`
-
-	tests := []struct {
+	testCases := []struct {
+		name         string
 		method       string
+		body         string
 		expectedCode int
 		expectedBody string
 	}{
-		{method: http.MethodGet, expectedCode: http.StatusMethodNotAllowed, expectedBody: ""},
-		{method: http.MethodPut, expectedCode: http.StatusMethodNotAllowed, expectedBody: ""},
-		{method: http.MethodDelete, expectedCode: http.StatusMethodNotAllowed, expectedBody: ""},
-		{method: http.MethodPost, expectedCode: http.StatusOK, expectedBody: successBody},
+		{
+			name:         "method_get",
+			method:       http.MethodGet,
+			expectedCode: http.StatusMethodNotAllowed,
+			expectedBody: "",
+		},
+		{
+			name:         "method_put",
+			method:       http.MethodPut,
+			expectedCode: http.StatusMethodNotAllowed,
+			expectedBody: "",
+		},
+		{
+			name:         "method_delete",
+			method:       http.MethodDelete,
+			expectedCode: http.StatusMethodNotAllowed,
+			expectedBody: "",
+		},
+		{
+			name:         "method_post_without_body",
+			method:       http.MethodPost,
+			expectedCode: http.StatusInternalServerError,
+			expectedBody: "",
+		},
+		{
+			name:         "method_post_unsupported_type",
+			method:       http.MethodPost,
+			body:         `{"request": {"type": "idunno", "command": "do something"}, "version": "1.0"}`,
+			expectedCode: http.StatusUnprocessableEntity,
+			expectedBody: "",
+		},
+		{
+			name:         "method_post_success",
+			method:       http.MethodPost,
+			body:         `{"request": {"type": "SimpleUtterance", "command": "sudo do something"}, "session": {"new": true}, "version": "1.0"}`,
+			expectedCode: http.StatusOK,
+			expectedBody: `Точное время .* часов, .* минут. Для вас нет новых сообщений.`,
+		},
 	}
 
-	for _, test := range tests {
-		t.Run(test.method, func(t *testing.T) {
+	for _, tc := range testCases {
+		t.Run(tc.method, func(t *testing.T) {
 			req := resty.New().R()
-			req.Method = test.method
+			req.Method = tc.method
 			req.URL = srv.URL
 
-			resp, err := req.Send()
-			assert.NoErrorf(t, err, "Error making HTTP request")
+			if len(tc.body) > 0 {
+				req.SetHeader("Content-Type", "application/json")
+				req.SetBody(tc.body)
+			}
 
-			assert.Equal(t, test.expectedCode, resp.StatusCode(), "Response code didn't match expected")
-			if test.expectedBody != "" {
-				assert.JSONEq(t, test.expectedBody, string(resp.Body()), "Response body didn't match expected")
+			resp, err := req.Send()
+			assert.NoError(t, err, "error making HTTP request")
+
+			assert.Equal(t, tc.expectedCode, resp.StatusCode(), "Response code didn't match expected")
+			if tc.expectedBody != "" {
+				assert.Regexp(t, tc.expectedBody, string(resp.Body()))
 			}
 		})
 	}
@@ -58,20 +92,8 @@ func TestGzipCompression(t *testing.T) {
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
-	requestBody := `{
-        "request": {
-            "type": "SimpleUtterance",
-            "command": "sudo do something"
-        },
-        "version": "1.0"
-    }`
-
-	successBody := `{
-        "response": {
-            "text": "Извините, я пока ничего не умею"
-        },
-        "version": "1.0"
-    }`
+	requestBody := `{"request": {"type": "SimpleUtterance", "command": "sudo do something"}, "session": {"new": true}, "version": "1.0"}`
+	successBody := `Точное время .* часов, .* минут. Для вас нет новых сообщений.`
 
 	t.Run("sends_gzip", func(t *testing.T) {
 		buf := bytes.NewBuffer(nil)
@@ -91,9 +113,12 @@ func TestGzipCompression(t *testing.T) {
 
 		defer resp.Body.Close()
 
-		b, err := io.ReadAll(resp.Body)
+		gr, err := gzip.NewReader(resp.Body)
+		defer gr.Close()
 		require.NoError(t, err)
-		require.JSONEq(t, successBody, string(b))
+		uncompressedData, err := io.ReadAll(gr)
+		require.NoError(t, err)
+		require.JSONEq(t, successBody, string(uncompressedData))
 	})
 
 	t.Run("accepts_gzip", func(t *testing.T) {
