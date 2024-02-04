@@ -2,13 +2,9 @@ package main
 
 import (
 	"aliceSkill/internal/logger"
-	"aliceSkill/internal/models"
-	"encoding/json"
-	"fmt"
 	"go.uber.org/zap"
 	"net/http"
 	"strings"
-	"time"
 )
 
 func main() {
@@ -24,8 +20,9 @@ func run() error {
 		return err
 	}
 
+	appInstance := newApp(nil)
 	logger.Log.Info("Running server", zap.String("address", flagRunAddr))
-	return http.ListenAndServe(flagRunAddr, logger.RequestLogger(gzipMiddleware(webhook)))
+	return http.ListenAndServe(flagRunAddr, logger.RequestLogger(gzipMiddleware(appInstance.webhook)))
 }
 
 func gzipMiddleware(h http.HandlerFunc) http.HandlerFunc {
@@ -56,7 +53,7 @@ func gzipMiddleware(h http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func webhook(w http.ResponseWriter, r *http.Request) {
+/*func webhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		logger.Log.Debug("got request with bad method", zap.String("method", r.Method))
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -117,4 +114,4 @@ func webhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	logger.Log.Debug("sending HTTP 200 response")
-}
+}*/
