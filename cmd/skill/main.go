@@ -2,6 +2,8 @@ package main
 
 import (
 	"aliceSkill/internal/logger"
+	"aliceSkill/internal/store/pg"
+	"database/sql"
 	"go.uber.org/zap"
 	"net/http"
 	"strings"
@@ -20,8 +22,17 @@ func run() error {
 		return err
 	}
 
-	appInstance := newApp(nil)
+	// создаём соединение с СУБД PostgreSQL с помощью аргумента командной строки
+	conn, err := sql.Open("pgx", flagDatabaseURI)
+	if err != nil {
+		return err
+	}
+
+	// создаём экземпляр приложения, передавая реализацию хранилища pg в качестве внешней зависимости
+	appInstance := newApp(pg.NewStore(conn))
+
 	logger.Log.Info("Running server", zap.String("address", flagRunAddr))
+	// обернём хендлер webhook в middleware с логированием и поддержкой gzip
 	return http.ListenAndServe(flagRunAddr, logger.RequestLogger(gzipMiddleware(appInstance.webhook)))
 }
 

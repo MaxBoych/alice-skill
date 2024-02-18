@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"aliceSkill/internal/logger"
@@ -29,7 +31,6 @@ func (a *app) webhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// десериализуем запрос в структуру модели
 	logger.Log.Debug("decoding request")
 	var req models.Request
 	dec := json.NewDecoder(r.Body)
@@ -39,49 +40,134 @@ func (a *app) webhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// проверим, что пришёл запрос понятного типа
 	if req.Request.Type != models.TypeSimpleUtterance {
 		logger.Log.Debug("unsupported request type", zap.String("type", req.Request.Type))
 		w.WriteHeader(http.StatusUnprocessableEntity)
 		return
 	}
 
-	// получаем список сообщений для текущего пользователя
-	messages, err := a.store.ListMessages(ctx, req.Session.User.UserID)
-	if err != nil {
-		logger.Log.Debug("cannot load messages for user", zap.Error(err))
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
+	// текст ответа навыка
+	var text string
 
-	// формируем текст с количеством сообщений
-	text := "Для вас нет новых сообщений."
-	if len(messages) > 0 {
-		text = fmt.Sprintf("Для вас %d новых сообщений.", len(messages))
-	}
+	switch true {
+	// пользователь попросил отправить сообщение
+	case strings.HasPrefix(req.Request.Command, "Отправь"):
+		// гипотетическая функция parseSendCommand вычленит из запроса логин адресата и текст сообщения
+		username, message := parseSendCommand(req.Request.Command)
 
-	// первый запрос новой сессии
-	if req.Session.New {
-		// обработаем поле Timezone запроса
-		tz, err := time.LoadLocation(req.Timezone)
+		// найдём внутренний идентификатор адресата по его логину
+		recipientID, err := a.store.FindRecipient(ctx, username)
 		if err != nil {
-			logger.Log.Debug("cannot parse timezone")
-			w.WriteHeader(http.StatusBadRequest)
+			logger.Log.Debug("cannot find recipient by username", zap.String("username", username), zap.Error(err))
+			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 
-		// получим текущее время в часовом поясе пользователя
-		now := time.Now().In(tz)
-		hour, minute, _ := now.Clock()
+		// сохраняем новое сообщение в СУБД, после успешного сохранения оно станет доступно для прослушивания получателем
+		err = a.store.SaveMessage(ctx, recipientID, store.Message{
+			Sender:  req.Session.User.UserID,
+			Time:    time.Now(),
+			Payload: message,
+		})
+		if err != nil {
+			logger.Log.Debug("cannot save message", zap.String("recipient", recipientID), zap.Error(err))
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 
-		// формируем новый текст приветствия
-		text = fmt.Sprintf("Точное время %d часов, %d минут. %s", hour, minute, text)
+		// Оповестим отправителя об успешности операции
+		text = "Сообщение успешно отправлено"
+
+	// пользователь попросил прочитать сообщение
+	case strings.HasPrefix(req.Request.Command, "Прочитай"):
+		// гипотетическая функция parseReadCommand вычленит из запроса порядковый номер сообщения в списке доступных
+		messageIndex := parseReadCommand(req.Request.Command)
+
+		// получим список непрослушанных сообщений пользователя
+		messages, err := a.store.ListMessages(ctx, req.Session.User.UserID)
+		if err != nil {
+			logger.Log.Debug("cannot load messages for user", zap.Error(err))
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		text = "Для вас нет новых сообщений."
+		if len(messages) < messageIndex {
+			// пользователь попросил прочитать сообщение, которого нет
+			text = "Такого сообщения не существует."
+		} else {
+			// получим сообщение по идентификатору
+			messageID := messages[messageIndex].ID
+			message, err := a.store.GetMessage(ctx, messageID)
+			if err != nil {
+				logger.Log.Debug("cannot load message", zap.Int64("id", messageID), zap.Error(err))
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+
+			// передадим текст сообщения в ответе
+			text = fmt.Sprintf("Сообщение от %s, отправлено %s: %s", message.Sender, message.Time, message.Payload)
+		}
+
+		// пользователь хочет зарегистрироваться
+	case strings.HasPrefix(req.Request.Command, "Зарегистрируй"):
+		// гипотетическая функция parseRegisterCommand вычленит из запроса
+		// желаемое имя нового пользователя
+		username := parseRegisterCommand(req.Request.Command)
+
+		// регистрируем пользователя
+		err := a.store.RegisterUser(ctx, req.Session.User.UserID, username)
+		// наличие неспецифичной ошибки
+		if err != nil && !errors.Is(err, store.ErrConflict) {
+			logger.Log.Debug("cannot register user", zap.Error(err))
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		// определяем правильное ответное сообщение пользователю
+		text = fmt.Sprintf("Вы успешно зарегистрированы под именем %s", username)
+		if errors.Is(err, store.ErrConflict) {
+			// ошибка специфична для случая конфликта имён пользователей
+			text = "Извините, такое имя уже занято. Попробуйте другое."
+		}
+
+	// если не поняли команду, просто скажем пользователю, сколько у него новых сообщений
+	default:
+		messages, err := a.store.ListMessages(ctx, req.Session.User.UserID)
+		if err != nil {
+			logger.Log.Debug("cannot load messages for user", zap.Error(err))
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		text = "Для вас нет новых сообщений."
+		if len(messages) > 0 {
+			text = fmt.Sprintf("Для вас %d новых сообщений.", len(messages))
+		}
+
+		// первый запрос новой сессии
+		if req.Session.New {
+			// обработаем поле Timezone запроса
+			tz, err := time.LoadLocation(req.Timezone)
+			if err != nil {
+				logger.Log.Debug("cannot parse timezone")
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+
+			// получим текущее время в часовом поясе пользователя
+			now := time.Now().In(tz)
+			hour, minute, _ := now.Clock()
+
+			// формируем новый текст приветствия
+			text = fmt.Sprintf("Точное время %d часов, %d минут. %s", hour, minute, text)
+		}
 	}
 
-	// заполним модель ответа
+	// заполняем модель ответа
 	resp := models.Response{
 		Response: models.ResponsePayload{
-			Text: text, // Алиса проговорит наш новый текст
+			Text: text, // Алиса проговорит текст
 		},
 		Version: "1.0",
 	}
